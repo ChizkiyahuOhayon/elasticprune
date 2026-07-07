@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+results/
+logs/
+logs_*.log
+baselines/
+*.tar.gz
+.DS_Store
