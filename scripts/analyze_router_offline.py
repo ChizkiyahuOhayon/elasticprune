@@ -47,11 +47,18 @@ from elasticprune.routers import (  # noqa: E402
 )
 
 
-FEATURES = [
+CANDIDATE_FEATURES = [
     "redundancy_erank",
     "query_specificity_entropy",
     "n_text_tokens",
     "question_len",
+    "attn_entropy_norm",
+    "attn_effective_support_norm",
+    "attn_gini",
+    "attn_top1_mass",
+    "attn_top5_mass",
+    "attn_top10_mass",
+    "attn_top25_mass",
 ]
 
 LABELS = [
@@ -110,8 +117,19 @@ def labeled_rows(records: List[Dict]) -> List[Dict]:
             "n_text_tokens": sig.get("n_text_tokens"),
             "_record": record,
         }
+        for key, value in sig.items():
+            if key.startswith("attn_"):
+                row[key] = value
         rows.append(row)
     return rows
+
+
+def available_features(rows: List[Dict]) -> List[str]:
+    features = []
+    for feature in CANDIDATE_FEATURES:
+        if any(row.get(feature) is not None for row in rows):
+            features.append(feature)
+    return features
 
 
 def finite(values):
@@ -199,6 +217,7 @@ def summarize_question_types(rows: List[Dict]) -> Dict:
 
 
 def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[float], bootstrap: int) -> Dict:
+    features = available_features(rows)
     preserve_rows = [row for row in rows if row["preserve_budget"] is not None]
     label_summary = {
         label: {
@@ -208,22 +227,22 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
         for label in LABELS
     }
 
-    feature_summary = {feature: describe(row[feature] for row in rows) for feature in FEATURES}
+    feature_summary = {feature: describe(row.get(feature) for row in rows) for feature in features}
     preserve_spearman = {
         feature: spearman(
-            [row[feature] for row in preserve_rows],
+            [row.get(feature) for row in preserve_rows],
             [row["preserve_budget"] for row in preserve_rows],
         )
-        for feature in FEATURES
+        for feature in features
     }
 
     label_predictiveness = {}
     for label in LABELS:
         label_predictiveness[label] = {}
-        for feature in FEATURES:
-            auc = roc_auc([row[feature] for row in rows], [row[label] for row in rows])
-            pos = [row[feature] for row in rows if row[label]]
-            neg = [row[feature] for row in rows if not row[label]]
+        for feature in features:
+            auc = roc_auc([row.get(feature) for row in rows], [row[label] for row in rows])
+            pos = [row.get(feature) for row in rows if row[label]]
+            neg = [row.get(feature) for row in rows if not row[label]]
             label_predictiveness[label][feature] = {
                 "pos_mean": mean(pos),
                 "neg_mean": mean(neg),
@@ -256,7 +275,7 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
             "acc_std": float(np.std([result["acc"] for result in random_results])),
             "avg_budget": mean(result["avg_budget"] for result in random_results),
         }
-        for feature in FEATURES:
+        for feature in features:
             for higher_is_harder in [True, False]:
                 name = f"{feature}_{'high' if higher_is_harder else 'low'}_hard"
                 router = QuantileFeatureRouter(feature, target, higher_is_harder)
@@ -303,7 +322,7 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
 
     return {
         "n_samples": len(records),
-        "features": FEATURES,
+        "features": features,
         "labels": LABELS,
         "label_summary": label_summary,
         "feature_summary": feature_summary,
@@ -318,11 +337,12 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
 
 
 def write_labeled_csv(path: str, rows: List[Dict]) -> None:
+    features = available_features(rows)
     fieldnames = [
         "qid", "imageId", "question", "answer", "question_type", "question_len",
         "pattern", "full_correct", "min_correct_budget", "preserve_budget",
         "easy_2pct", "hard_preserve_gt_25", "fragile", "correction",
-        "nonmonotonic", "prune1_matches_full", *FEATURES,
+        "nonmonotonic", "prune1_matches_full", *features,
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

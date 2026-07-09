@@ -39,3 +39,48 @@ def signal_specificity(image_features: torch.Tensor, query_embeds: torch.Tensor)
 def difficulty_score(redundancy: float, specificity: float, w: float = 0.5) -> float:
     """合成难度分，高 = 需要更多 token。两个信号都是"低=可激进"，直接加权。"""
     return w * redundancy + (1 - w) * specificity
+
+
+@torch.no_grad()
+def signal_distribution_concentration(scores: torch.Tensor, prefix: str = "") -> dict:
+    """Summarize concentration of a non-negative token score distribution.
+
+    Low entropy/effective support and high top-k mass indicate that the selector
+    sees a small set of dominant visual tokens. That should be more directly
+    relevant to pruning risk than global feature rank alone.
+    """
+    x = scores.detach().float().flatten().clamp_min(0)
+    n = int(x.numel())
+    if n == 0:
+        return {}
+    total = x.sum()
+    if not torch.isfinite(total) or total <= 0:
+        p = torch.full_like(x, 1.0 / n)
+    else:
+        p = x / total
+
+    p_sorted = torch.sort(p, descending=True).values
+    entropy = -(p * (p + 1e-12).log()).sum()
+    entropy_norm = entropy / torch.log(torch.tensor(float(n), device=p.device))
+    effective_support = torch.exp(entropy) / n
+
+    ascending = torch.sort(p).values
+    index = torch.arange(1, n + 1, device=p.device, dtype=p.dtype)
+    # Gini coefficient for a probability vector; 0=uniform, high=concentrated.
+    gini = (2 * (index * ascending).sum() / n) - (n + 1) / n
+
+    def top_mass(k: int) -> float:
+        return p_sorted[: min(k, n)].sum().item()
+
+    result = {
+        "entropy_norm": entropy_norm.item(),
+        "effective_support_norm": effective_support.item(),
+        "gini": gini.item(),
+        "top1_mass": top_mass(1),
+        "top5_mass": top_mass(5),
+        "top10_mass": top_mass(10),
+        "top25_mass": top_mass(25),
+        "max_score": x.max().item(),
+        "mean_score": x.mean().item(),
+    }
+    return {f"{prefix}{k}": v for k, v in result.items()}

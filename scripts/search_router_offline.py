@@ -39,11 +39,13 @@ from elasticprune.eval_utils import (  # noqa: E402
     full_correct,
     mean,
     min_correct_budget,
+    normalize_text,
     question_type,
     ratio_key,
     token_count,
 )
 from elasticprune.routers import (  # noqa: E402
+    AgreementFallbackRouter,
     BudgetRouter,
     CascadeAgreementRouter,
     PairAgreementRouter,
@@ -52,7 +54,19 @@ from elasticprune.routers import (  # noqa: E402
     RandomAdaptiveRouter,
 )
 
-FEATURES = ["redundancy_erank", "query_specificity_entropy", "n_text_tokens", "question_len"]
+CANDIDATE_FEATURES = [
+    "redundancy_erank",
+    "query_specificity_entropy",
+    "n_text_tokens",
+    "question_len",
+    "attn_entropy_norm",
+    "attn_effective_support_norm",
+    "attn_gini",
+    "attn_top1_mass",
+    "attn_top5_mass",
+    "attn_top10_mass",
+    "attn_top25_mass",
+]
 
 
 @dataclass(frozen=True)
@@ -102,7 +116,17 @@ def make_rows(records: List[Dict]) -> List[Dict]:
             "query_specificity_entropy": sig.get("query_specificity_entropy"),
             "n_text_tokens": sig.get("n_text_tokens"),
         })
+        for key, value in sig.items():
+            if key.startswith("attn_"):
+                rows[-1][key] = value
     return rows
+
+
+def available_features(rows: List[Dict]) -> List[str]:
+    return [
+        feature for feature in CANDIDATE_FEATURES
+        if any(row.get(feature) is not None for row in rows)
+    ]
 
 
 def split_indices(n: int, train_frac: float, seed: int):
@@ -147,10 +171,10 @@ def random_results(records: List[Dict], target: float, seeds: int = 20) -> Dict:
     }
 
 
-def feature_candidates(targets: Iterable[float]) -> List[Candidate]:
+def feature_candidates(targets: Iterable[float], features: List[str]) -> List[Candidate]:
     candidates = []
     for target in targets:
-        for feature in FEATURES:
+        for feature in features:
             candidates.append(Candidate(
                 f"{feature}_high_hard_target_{ratio_key(target)}",
                 QuantileFeatureRouter(feature, target, higher_is_harder=True),
@@ -192,6 +216,71 @@ def stability_candidates() -> List[Candidate]:
         )
         for stages in cascades
     )
+    return candidates
+
+
+def agreement_fallback_candidates(train_records: List[Dict], train_rows: List[Dict], targets: Iterable[float]) -> List[Candidate]:
+    qtypes = sorted(set(row["question_type"] for row in train_rows))
+    fallback_budgets = [0.05, 0.10, 0.25, 0.50, 1.00]
+    probe_pairs = [(0.02, 0.05), (0.02, 0.10), (0.05, 0.10)]
+    candidates = []
+
+    for low, high in probe_pairs:
+        low_key, high_key = ratio_key(low), ratio_key(high)
+        # Aggregate train correctness/cost by question type and agreement state.
+        stats = {
+            qtype: {
+                "agree_n": 0,
+                "agree_correct_low": 0,
+                "disagree_n": 0,
+                "fallback_correct": {budget: 0 for budget in fallback_budgets},
+            }
+            for qtype in qtypes
+        }
+        for record, row in zip(train_records, train_rows):
+            qtype = row["question_type"]
+            agree = normalize_text(record["pred"][low_key]) == normalize_text(record["pred"][high_key])
+            if agree:
+                stats[qtype]["agree_n"] += 1
+                stats[qtype]["agree_correct_low"] += int(record["correct"][low_key])
+            else:
+                stats[qtype]["disagree_n"] += 1
+                for budget in fallback_budgets:
+                    stats[qtype]["fallback_correct"][budget] += int(record["correct"][ratio_key(budget)])
+
+        for target in targets:
+            best = None
+            for combo in itertools.product(fallback_budgets, repeat=len(qtypes)):
+                mapping = dict(zip(qtypes, combo))
+                total_correct = 0
+                total_cost = 0.0
+                for qtype in qtypes:
+                    s = stats[qtype]
+                    total_correct += s["agree_correct_low"]
+                    total_cost += s["agree_n"] * (low + high)
+                    fallback = mapping[qtype]
+                    total_correct += s["fallback_correct"][fallback]
+                    extra = 0.0 if fallback in {low, high} else fallback
+                    total_cost += s["disagree_n"] * (low + high + extra)
+                avg_cost = total_cost / len(train_records)
+                if avg_cost > target:
+                    continue
+                acc = total_correct / len(train_records)
+                if best is None or acc > best[0]["acc"]:
+                    best = ({"acc": acc, "selection_cost": avg_cost}, mapping)
+            if best is None:
+                continue
+            _, mapping = best
+            name = (
+                f"agreement_fallback_{ratio_key(low)}_{ratio_key(high)}"
+                f"_target_{ratio_key(target)}"
+            )
+            candidates.append(Candidate(
+                name,
+                AgreementFallbackRouter(low, high, mapping, default_fallback=0.25, router_name=name),
+                cost_mode="cumulative",
+            ))
+
     return candidates
 
 
@@ -257,9 +346,11 @@ def run_search(records: List[Dict], rows: List[Dict], targets: List[float], trai
     train_records, test_records = take(records, train_idx), take(records, test_idx)
     train_rows, test_rows = take(rows, train_idx), take(rows, test_idx)
 
-    base_candidates = feature_candidates(targets) + stability_candidates()
+    features = available_features(train_rows)
+    base_candidates = feature_candidates(targets, features) + stability_candidates()
     calibrated_qtype = question_type_candidates(train_records, train_rows, targets)
-    all_candidates = base_candidates + calibrated_qtype
+    calibrated_agreement = agreement_fallback_candidates(train_records, train_rows, targets)
+    all_candidates = base_candidates + calibrated_qtype + calibrated_agreement
 
     selections = {}
     for target in targets:
@@ -278,6 +369,7 @@ def run_search(records: List[Dict], rows: List[Dict], targets: List[float], trai
         "train_frac": train_frac,
         "seed": seed,
         "targets": targets,
+        "features": features,
         "train_fixed": fixed_results(train_records),
         "test_fixed": fixed_results(test_records),
         "test_random": {

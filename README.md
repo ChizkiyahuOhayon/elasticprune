@@ -64,6 +64,7 @@ code/
 - 3090 上 llava-1.5-7b bf16 约占 15GB，单卡余量充足；13B 需要注意 eager 注意力的激活显存
 - lmms-eval 的 task 名（`mmbench_en_dev` 等）以 `python -m lmms_eval --tasks list` 输出为准
 - 当前 `redundancy_erank + query_specificity_entropy` 的 naive router 已经在 GQA v2 上离线验证过，预测力不足；第三轮正式 GPU 实验前必须先改进 router signal。
+- 新版 oracle 会额外记录 selector attention concentration signals（`attn_entropy_norm`、`attn_top*_mass`、`attn_gini` 等）。离线 router 脚本会自动检测这些字段；旧结果没有这些字段时仍可正常分析。
 
 ## Oracle 结果判读
 

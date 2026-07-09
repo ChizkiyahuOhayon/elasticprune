@@ -20,7 +20,11 @@ import torch
 from datasets import load_dataset
 from transformers import LlavaForConditionalGeneration, AutoProcessor
 from elasticprune.pruning import _capture_merged_embeds, full_generate, prune_generate
-from elasticprune.signals import signal_redundancy, signal_specificity
+from elasticprune.signals import (
+    signal_distribution_concentration,
+    signal_redundancy,
+    signal_specificity,
+)
 
 RATIOS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00]
 MODEL = "llava-hf/llava-1.5-7b-hf"
@@ -35,7 +39,7 @@ def decode_new_tokens(processor, output_ids) -> str:
 
 
 @torch.no_grad()
-def compute_free_signals(model, inputs):
+def compute_free_signals(model, inputs, prune_layer: int = 2):
     """Compute cheap sample signals from the merged prompt embeddings.
 
     This uses a single full forward pass. It is for analysis/calibration only;
@@ -46,7 +50,7 @@ def compute_free_signals(model, inputs):
     if not img_mask.any():
         return {}
 
-    merged_embeds, _ = _capture_merged_embeds(model, inputs)
+    merged_embeds, attentions = _capture_merged_embeds(model, inputs)
     image_features = merged_embeds[0, img_mask]
     query_features = merged_embeds[0, ~img_mask]
     out = {
@@ -55,6 +59,10 @@ def compute_free_signals(model, inputs):
         "n_image_tokens": int(img_mask.sum().item()),
         "n_text_tokens": int((~img_mask).sum().item()),
     }
+    if attentions and len(attentions) > prune_layer:
+        attn = attentions[prune_layer][0, :, -1, :].mean(0)
+        image_scores = attn[img_mask]
+        out.update(signal_distribution_concentration(image_scores, prefix="attn_"))
     return out
 
 

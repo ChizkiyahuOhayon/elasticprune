@@ -165,6 +165,51 @@ class PairAgreementRouter(BudgetRouter):
 
 
 @dataclass(frozen=True)
+class AgreementFallbackRouter(BudgetRouter):
+    """Probe agreement router with query-type-specific fallback budgets.
+
+    The router first compares predictions at low_budget and high_budget. If the
+    normalized predictions agree, it accepts low_budget. Otherwise, it falls back
+    to a budget selected by question_type.
+    """
+
+    low_budget: float
+    high_budget: float
+    fallback_by_type: Mapping[str, float]
+    default_fallback: float = 0.25
+    router_name: str = "agreement_fallback"
+
+    @property
+    def name(self) -> str:
+        return self.router_name
+
+    def route(self, records: List[Dict], rows: Optional[List[Dict]] = None) -> List[float]:
+        if rows is None:
+            raise ValueError("AgreementFallbackRouter requires labeled rows")
+        budgets = []
+        low_key = ratio_key(self.low_budget)
+        high_key = ratio_key(self.high_budget)
+        for record, row in zip(records, rows):
+            low_pred = normalize_text(record["pred"][low_key])
+            high_pred = normalize_text(record["pred"][high_key])
+            if low_pred == high_pred:
+                budgets.append(self.low_budget)
+            else:
+                budgets.append(float(self.fallback_by_type.get(row["question_type"], self.default_fallback)))
+        return budgets
+
+    def cumulative_costs(self, records: List[Dict], budgets: List[float]) -> List[float]:
+        costs = []
+        already_probed = {self.low_budget, self.high_budget}
+        for budget in budgets:
+            cost = self.low_budget + self.high_budget
+            if budget not in already_probed:
+                cost += budget
+            costs.append(cost)
+        return costs
+
+
+@dataclass(frozen=True)
 class CascadeAgreementRouter(BudgetRouter):
     stages: List[float]
 

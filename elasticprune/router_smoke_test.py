@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from elasticprune.eval_utils import evaluate_budget_assignment
 from elasticprune.routers import (
+    AgreementFallbackRouter,
     CascadeAgreementRouter,
     FixedBudgetRouter,
     PairAgreementRouter,
@@ -64,6 +65,16 @@ def main():
     pair_budgets = pair.route(records, rows)
     assert pair_budgets == [0.02, 0.25, 0.02]
     assert pair.cumulative_costs(records, pair_budgets) == [0.07, 0.32, 0.07]
+
+    agreement_fallback = AgreementFallbackRouter(
+        0.02,
+        0.05,
+        {"color": 0.10, "count": 0.25},
+        default_fallback=0.50,
+    )
+    fallback_budgets = agreement_fallback.route(records, rows)
+    assert fallback_budgets == [0.02, 0.10, 0.02]
+    assert agreement_fallback.cumulative_costs(records, fallback_budgets) == [0.07, 0.17, 0.07]
 
     cascade = CascadeAgreementRouter([0.02, 0.10, 0.25])
     assert cascade.route(records, rows) == [0.10, 0.25, 0.25]
