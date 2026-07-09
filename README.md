@@ -17,6 +17,7 @@ code/
     ├── oracle_gqa.py         # ★ Go/No-Go 实验：oracle 预算上界
     ├── analyze_oracle.py     # oracle 结果分析：task/preservation/correction/non-monotonic
     ├── analyze_router_offline.py # 离线路由器可行性分析（不跑模型）
+    ├── search_router_offline.py  # train/test 离线搜索，选择是否进入真实 GPU router 实验
     └── run_eval_matrix.sh    # 8 卡并行 benchmark 矩阵（lmms-eval）
 ```
 
@@ -40,12 +41,19 @@ code/
      --csv results/router_labeled_samples.csv \
      --md results/router_offline.md
    ```
-6. 只有当离线 router 明确打过 fixed/random adaptive baseline 后，再跑真实 router 推理实验。
-7. 修改 router 代码后先跑不依赖 GPU 的检查：
+6. 用 train/test 搜索检查 router 是否泛化：
+   ```bash
+   python scripts/search_router_offline.py \
+     --dir results \
+     --out results/router_search.json \
+     --md results/router_search.md
+   ```
+7. 只有当 held-out split 上的 router 明确打过 fixed/random adaptive baseline 后，再跑真实 router 推理实验。
+8. 修改 router 代码后先跑不依赖 GPU 的检查：
    ```bash
    python -m elasticprune.router_smoke_test
    ```
-8. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
+9. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
 
 ## 已知注意事项（未在真机验证，预期需要小修）
 
