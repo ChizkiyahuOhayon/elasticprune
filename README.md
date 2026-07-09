@@ -9,6 +9,9 @@ code/
 │   ├── pruning.py            # FastV 风格剪枝，支持每样本 keep_ratio（两遍实现）
 │   ├── signals.py            # 预算信号：视觉冗余度 + 查询特异性
 │   ├── budget.py             # 难度分 → 保留率的分位数映射（保证平均预算守恒）
+│   ├── eval_utils.py         # oracle 记录的离线评估工具
+│   ├── routers.py            # fixed/random/heuristic/stability budget routers
+│   ├── router_smoke_test.py  # 不依赖 GPU 的 router 单元级冒烟测试
 │   └── smoke_test.py         # 单卡全链路冒烟测试
 └── scripts/
     ├── oracle_gqa.py         # ★ Go/No-Go 实验：oracle 预算上界
@@ -38,7 +41,11 @@ code/
      --md results/router_offline.md
    ```
 6. 只有当离线 router 明确打过 fixed/random adaptive baseline 后，再跑真实 router 推理实验。
-7. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
+7. 修改 router 代码后先跑不依赖 GPU 的检查：
+   ```bash
+   python -m elasticprune.router_smoke_test
+   ```
+8. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
 
 ## 已知注意事项（未在真机验证，预期需要小修）
 

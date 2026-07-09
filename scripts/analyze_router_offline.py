@@ -18,7 +18,6 @@ import csv
 import json
 import os
 import sys
-from collections import Counter, defaultdict
 from glob import glob
 from typing import Dict, List, Optional
 
@@ -29,18 +28,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from elasticprune.eval_utils import (  # noqa: E402
     RATIOS,
     bootstrap_ci,
-    budget_distribution,
     correct_vector,
     evaluate_budget_assignment,
-    exact_match,
     fixed_budget,
     full_correct,
     mean,
     min_correct_budget,
-    normalize_text,
     question_type,
     ratio_key,
     token_count,
+)
+from elasticprune.routers import (  # noqa: E402
+    CascadeAgreementRouter,
+    PairAgreementRouter,
+    QuantileFeatureRouter,
+    QuestionTypeRouter,
+    RandomAdaptiveRouter,
 )
 
 
@@ -167,94 +170,13 @@ def roc_auc(scores, labels) -> Optional[float]:
     return float((rank_sum_pos - len(pos) * (len(pos) + 1) / 2.0) / (len(pos) * len(neg)))
 
 
-def random_adaptive_budgets(n: int, target_budget: float, seed: int) -> List[float]:
-    rng = np.random.default_rng(seed)
-    budgets = np.full(n, 0.02)
-    order = np.arange(n)
-    rng.shuffle(order)
-    levels = [0.05, 0.10, 0.25, 0.50, 1.00]
-    p = 0
-    while budgets.mean() < target_budget and p < n:
-        idx = order[p]
-        higher = [x for x in levels if x > budgets[idx]]
-        if not higher:
-            p += 1
-            continue
-        old = budgets[idx]
-        budgets[idx] = higher[0]
-        if budgets.mean() > target_budget:
-            budgets[idx] = old
-            p += 1
-    return budgets.tolist()
-
-
-def quantile_router_budgets(rows: List[Dict], feature: str, target_budget: float, higher_is_harder: bool) -> List[float]:
-    values = np.asarray([row[feature] for row in rows], dtype=float)
-    if not higher_is_harder:
-        values = -values
-    order = np.argsort(values)
-    budgets = np.full(len(rows), 0.02)
-    levels = [0.05, 0.10, 0.25, 0.50, 1.00]
-    idx = len(order) - 1
-    while budgets.mean() < target_budget and idx >= 0:
-        sample_idx = order[idx]
-        higher = [x for x in levels if x > budgets[sample_idx]]
-        if not higher:
-            idx -= 1
-            continue
-        old = budgets[sample_idx]
-        budgets[sample_idx] = higher[0]
-        if budgets.mean() > target_budget:
-            budgets[sample_idx] = old
-            idx -= 1
-    return budgets.tolist()
-
-
-def question_type_budgets(rows: List[Dict], mapping: Dict[str, float]) -> List[float]:
-    default = mapping.get("default", 0.25)
-    return [float(mapping.get(row["question_type"], default)) for row in rows]
-
-
-def pair_agreement_router(records: List[Dict], low: float, high: float, fallback: float) -> Dict:
-    budgets = []
-    cumulative_costs = []
-    for record in records:
-        low_pred = normalize_text(record["pred"][ratio_key(low)])
-        high_pred = normalize_text(record["pred"][ratio_key(high)])
-        use_budget = low if low_pred == high_pred else fallback
-        budgets.append(use_budget)
-        cumulative_costs.append(low + high + (fallback if use_budget == fallback else 0.0))
+def evaluate_router(router, records: List[Dict], rows: List[Dict]) -> Dict:
+    budgets = router.route(records, rows)
     result = evaluate_budget_assignment(records, budgets)
-    result["avg_cumulative_budget"] = mean(cumulative_costs)
+    cumulative = router.cumulative_costs(records, budgets)
+    if cumulative is not None:
+        result["avg_cumulative_budget"] = mean(cumulative)
     return result
-
-
-def cascade_agreement_router(records: List[Dict], stages: List[float]) -> Dict:
-    correctness = []
-    final_budgets = []
-    cumulative_costs = []
-    for record in records:
-        previous = None
-        final_budget = stages[-1]
-        final_pred = record["pred"][ratio_key(final_budget)]
-        cost = 0.0
-        for stage in stages:
-            pred = record["pred"][ratio_key(stage)]
-            cost += stage
-            final_budget = stage
-            final_pred = pred
-            if previous is not None and normalize_text(pred) == normalize_text(previous):
-                break
-            previous = pred
-        correctness.append(float(exact_match(final_pred, record["answer"])))
-        final_budgets.append(final_budget)
-        cumulative_costs.append(cost)
-    return {
-        "acc": mean(correctness),
-        "avg_final_budget": mean(final_budgets),
-        "avg_cumulative_budget": mean(cumulative_costs),
-        "budget_distribution": budget_distribution(final_budgets),
-    }
 
 
 def summarize_question_types(rows: List[Dict]) -> Dict:
@@ -326,7 +248,7 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
         key = ratio_key(target)
         routers[key] = {}
         random_results = [
-            evaluate_budget_assignment(records, random_adaptive_budgets(len(records), target, seed))
+            evaluate_router(RandomAdaptiveRouter(target, seed=seed), records, rows)
             for seed in range(20)
         ]
         routers[key]["random_adaptive"] = {
@@ -337,30 +259,46 @@ def build_summary(records: List[Dict], rows: List[Dict], target_budgets: List[fl
         for feature in FEATURES:
             for higher_is_harder in [True, False]:
                 name = f"{feature}_{'high' if higher_is_harder else 'low'}_hard"
-                budgets = quantile_router_budgets(rows, feature, target, higher_is_harder)
-                routers[key][name] = evaluate_budget_assignment(records, budgets)
+                router = QuantileFeatureRouter(feature, target, higher_is_harder)
+                routers[key][name] = evaluate_router(router, records, rows)
 
     heuristic_routers = {
-        "yes_no_0.02_else_0.25": evaluate_budget_assignment(
+        "yes_no_0.02_else_0.25": evaluate_router(
+            QuestionTypeRouter({"yes_no": 0.02}, default_budget=0.25),
             records,
-            question_type_budgets(rows, {"yes_no": 0.02, "default": 0.25}),
+            rows,
         ),
-        "yes_no_0.02_color_0.10_else_0.25": evaluate_budget_assignment(
+        "yes_no_0.02_color_0.10_else_0.25": evaluate_router(
+            QuestionTypeRouter({"yes_no": 0.02, "color": 0.10}, default_budget=0.25),
             records,
-            question_type_budgets(rows, {"yes_no": 0.02, "color": 0.10, "default": 0.25}),
+            rows,
         ),
-        "yes_no_0.05_color_0.10_what_0.25_else_0.50": evaluate_budget_assignment(
+        "yes_no_0.05_color_0.10_what_0.25_else_0.50": evaluate_router(
+            QuestionTypeRouter(
+                {"yes_no": 0.05, "color": 0.10, "what": 0.25},
+                default_budget=0.50,
+            ),
             records,
-            question_type_budgets(rows, {"yes_no": 0.05, "color": 0.10, "what": 0.25, "default": 0.50}),
+            rows,
         ),
     }
 
     stability_routers = {
-        "pair_0.02_0.05_else_0.25": pair_agreement_router(records, 0.02, 0.05, 0.25),
-        "pair_0.02_0.10_else_0.25": pair_agreement_router(records, 0.02, 0.10, 0.25),
-        "pair_0.02_0.10_else_0.50": pair_agreement_router(records, 0.02, 0.10, 0.50),
-        "cascade_0.02_0.10_0.25_0.50": cascade_agreement_router(records, [0.02, 0.10, 0.25, 0.50]),
-        "cascade_0.02_0.10_0.25_0.50_1.0": cascade_agreement_router(records, [0.02, 0.10, 0.25, 0.50, 1.00]),
+        "pair_0.02_0.05_else_0.25": evaluate_router(
+            PairAgreementRouter(0.02, 0.05, 0.25), records, rows
+        ),
+        "pair_0.02_0.10_else_0.25": evaluate_router(
+            PairAgreementRouter(0.02, 0.10, 0.25), records, rows
+        ),
+        "pair_0.02_0.10_else_0.50": evaluate_router(
+            PairAgreementRouter(0.02, 0.10, 0.50), records, rows
+        ),
+        "cascade_0.02_0.10_0.25_0.50": evaluate_router(
+            CascadeAgreementRouter([0.02, 0.10, 0.25, 0.50]), records, rows
+        ),
+        "cascade_0.02_0.10_0.25_0.50_1.0": evaluate_router(
+            CascadeAgreementRouter([0.02, 0.10, 0.25, 0.50, 1.00]), records, rows
+        ),
     }
 
     return {
