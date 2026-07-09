@@ -12,6 +12,8 @@ code/
 │   └── smoke_test.py         # 单卡全链路冒烟测试
 └── scripts/
     ├── oracle_gqa.py         # ★ Go/No-Go 实验：oracle 预算上界
+    ├── analyze_oracle.py     # oracle 结果分析：task/preservation/correction/non-monotonic
+    ├── analyze_router_offline.py # 离线路由器可行性分析（不跑模型）
     └── run_eval_matrix.sh    # 8 卡并行 benchmark 矩阵（lmms-eval）
 ```
 
@@ -27,7 +29,16 @@ code/
    done; wait
    ```
 4. 看输出中 `oracle: acc X @ avg budget Y` vs 各固定比例的 acc——**同等平均预算下 oracle 增益 ≥2% 才继续**
-5. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
+5. 用 oracle v2 结果先做离线路由器诊断，不要直接把 naive adaptive router 发到 8 卡：
+   ```bash
+   python scripts/analyze_router_offline.py \
+     --dir results \
+     --out results/router_offline.json \
+     --csv results/router_labeled_samples.csv \
+     --md results/router_offline.md
+   ```
+6. 只有当离线 router 明确打过 fixed/random adaptive baseline 后，再跑真实 router 推理实验。
+7. `bash scripts/run_eval_matrix.sh` 跑无剪枝 baseline 全矩阵，建立参照
 
 ## 已知注意事项（未在真机验证，预期需要小修）
 
@@ -37,6 +48,7 @@ code/
 - GQA 数据集字段名以 `lmms-lab/GQA` 实际 schema 为准，`imageId`/`id` 可能需对照调整
 - 3090 上 llava-1.5-7b bf16 约占 15GB，单卡余量充足；13B 需要注意 eager 注意力的激活显存
 - lmms-eval 的 task 名（`mmbench_en_dev` 等）以 `python -m lmms_eval --tasks list` 输出为准
+- 当前 `redundancy_erank + query_specificity_entropy` 的 naive router 已经在 GQA v2 上离线验证过，预测力不足；第三轮正式 GPU 实验前必须先改进 router signal。
 
 ## Oracle 结果判读
 
