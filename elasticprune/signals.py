@@ -84,3 +84,54 @@ def signal_distribution_concentration(scores: torch.Tensor, prefix: str = "") ->
         "mean_score": x.mean().item(),
     }
     return {f"{prefix}{k}": v for k, v in result.items()}
+
+
+@torch.no_grad()
+def signal_budget_boundaries(scores: torch.Tensor, ratios, prefix: str = "") -> dict:
+    """Selector mass and boundary margin at each candidate keep ratio."""
+    x = scores.detach().float().flatten().clamp_min(0)
+    n = int(x.numel())
+    if n == 0:
+        return {}
+    total = x.sum()
+    p = x / total if torch.isfinite(total) and total > 0 else torch.full_like(x, 1.0 / n)
+    ordered = torch.sort(p, descending=True).values
+    result = {}
+    for ratio in ratios:
+        keep = max(1, min(n, int(n * float(ratio))))
+        threshold = ordered[keep - 1]
+        next_score = ordered[keep] if keep < n else torch.zeros_like(threshold)
+        gap = threshold - next_score
+        name = str(int(round(float(ratio) * 100)))
+        result[f"keep{name}_mass"] = ordered[:keep].sum().item()
+        result[f"keep{name}_boundary_gap"] = gap.item()
+        result[f"keep{name}_relative_gap"] = (gap / (threshold + 1e-12)).item()
+    return {f"{prefix}{key}": value for key, value in result.items()}
+
+
+@torch.no_grad()
+def signal_pair_stability(scores_a: torch.Tensor, scores_b: torch.Tensor,
+                          keep_ratio: float = 0.25, prefix: str = "") -> dict:
+    """Measure how stable a visual-token ranking is between two layers."""
+    a = scores_a.detach().float().flatten().clamp_min(0)
+    b = scores_b.detach().float().flatten().clamp_min(0)
+    if a.numel() == 0 or a.shape != b.shape:
+        return {}
+
+    def normalize(values):
+        total = values.sum()
+        return values / total if torch.isfinite(total) and total > 0 else torch.full_like(
+            values, 1.0 / values.numel()
+        )
+
+    pa, pb = normalize(a), normalize(b)
+    keep = max(1, min(a.numel(), int(a.numel() * float(keep_ratio))))
+    top_a = set(torch.topk(pa, keep).indices.cpu().tolist())
+    top_b = set(torch.topk(pb, keep).indices.cpu().tolist())
+    union = top_a | top_b
+    result = {
+        "cosine": torch.nn.functional.cosine_similarity(pa, pb, dim=0).item(),
+        "l1": torch.abs(pa - pb).sum().item(),
+        "topk_jaccard": len(top_a & top_b) / len(union) if union else 1.0,
+    }
+    return {f"{prefix}{key}": value for key, value in result.items()}

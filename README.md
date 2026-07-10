@@ -18,8 +18,15 @@ code/
     ├── analyze_oracle.py     # oracle 结果分析：task/preservation/correction/non-monotonic
     ├── analyze_router_offline.py # 离线路由器可行性分析（不跑模型）
     ├── search_router_offline.py  # train/test 离线搜索，选择是否进入真实 GPU router 实验
+    ├── oracle_textvqa.py     # TextVQA 外部有效性 response matrix（单次 selector capture）
+    ├── analyze_textvqa_oracle.py # TextVQA soft accuracy / behavior / oracle 摘要
+    ├── run_textvqa_external_oracle.sh # smoke + 8 卡完整运行入口
     └── run_eval_matrix.sh    # 8 卡并行 benchmark 矩阵（lmms-eval）
 ```
+
+## 当前外部有效性实验
+
+GQA 上的 cheap-signal response predictor 已在 image-disjoint test 中失败。不要继续运行旧 router。下一步只执行 TextVQA 外部有效性数据采集，详细命令见 [`TEXTVQA_8GPU.md`](TEXTVQA_8GPU.md)。
 
 ## 本周执行顺序
 

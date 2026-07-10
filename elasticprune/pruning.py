@@ -28,12 +28,11 @@ def _capture_merged_embeds(model, inputs):
 
 
 @torch.no_grad()
-def prune_generate(model, inputs, keep_ratio: float, prune_layer: int = 2,
-                   max_new_tokens: int = 64, keep_positions: bool = True):
-    """按 keep_ratio 剪枝图像 token 后生成。keep_ratio=1.0 等价于不剪。
-
-    返回 generated_ids（仅新生成部分）。
-    """
+def prune_generate_from_capture(model, inputs, merged_embeds, attentions,
+                                keep_ratio: float, prune_layer: int = 2,
+                                max_new_tokens: int = 64,
+                                keep_positions: bool = True):
+    """Reuse one selector capture to generate at a requested keep ratio."""
     input_ids = inputs["input_ids"]  # (1, L)
     assert input_ids.shape[0] == 1, "研究阶段先只支持 batch=1"
     img_mask = input_ids[0] == model.config.image_token_index  # (L,)
@@ -41,8 +40,6 @@ def prune_generate(model, inputs, keep_ratio: float, prune_layer: int = 2,
     n_img = len(img_pos)
     n_keep = max(1, int(n_img * keep_ratio))
 
-    # Pass 1
-    merged_embeds, attentions = _capture_merged_embeds(model, inputs)
     # 最后一个 token 对所有位置的注意力, head 均值: (L,)
     attn = attentions[prune_layer][0, :, -1, :].mean(0)
     img_scores = attn[img_pos]
@@ -66,6 +63,26 @@ def prune_generate(model, inputs, keep_ratio: float, prune_layer: int = 2,
 
     out = model.language_model.generate(**gen_kwargs)
     return out
+
+
+@torch.no_grad()
+def prune_generate(model, inputs, keep_ratio: float, prune_layer: int = 2,
+                   max_new_tokens: int = 64, keep_positions: bool = True):
+    """按 keep_ratio 剪枝图像 token 后生成。keep_ratio=1.0 等价于不剪。
+
+    返回 generated_ids（仅新生成部分）。
+    """
+    merged_embeds, attentions = _capture_merged_embeds(model, inputs)
+    return prune_generate_from_capture(
+        model,
+        inputs,
+        merged_embeds,
+        attentions,
+        keep_ratio=keep_ratio,
+        prune_layer=prune_layer,
+        max_new_tokens=max_new_tokens,
+        keep_positions=keep_positions,
+    )
 
 
 @torch.no_grad()
